@@ -1,0 +1,599 @@
+---
+title: "Final Project"
+output: pdf_document
+date: "2023-12-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(knitr)
+library(latex2exp)
+library(dplyr)   
+library(ggplot2)
+library(lubridate)
+library(car)
+library(treemapify)
+
+options(scipen=999)
+
+opts_chunk$set(tidy.opts=list(width.cutoff=60)) 
+set.seed(230)  # set the random number generator to always give the same random numbers
+
+```
+
+
+
+## Final Project: Analysis of Soccer Player Market Values
+## Author: Emiliano Colin-Diaz
+
+```{r, echo=FALSE}
+
+appearences <- read.csv("appearances.csv")
+
+player_valuations <- read.csv("player_valuations.csv")
+
+players <- read.csv("players.csv")
+
+active_players <- player_valuations |>
+                  filter(last_season == '2023')
+
+player_values <- players |>
+                    filter(current_club_domestic_competition_id == 'GB1') |>
+                    filter(!is.na(market_value_in_eur)) |>
+                    filter(player_id %in% active_players$player_id) |>
+                    select(player_id, name, country_of_citizenship, date_of_birth, sub_position, position, foot, height_in_cm, market_value_in_eur, highest_market_value_in_eur, current_club_name)
+
+nation_rankings <- read.csv("FIFA_rankings.csv")
+
+nation_rankings <- nation_rankings |>
+                    rename("country_of_citizenship" = "Nation")
+
+nation_rankings <- nation_rankings|> 
+    mutate(country_of_citizenship = ifelse(row_number() == 60, "Ireland", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 12, "United States", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 21, "Iran", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 23, "Korea, South", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 39, "Czech Republic", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 50, "Cote d'Ivoire", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 67, "DR Congo", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 69, "Bosnia-Herzegovina", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 104, "New Zealand", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 37, "Turkey", country_of_citizenship))
+  
+  
+player_values <- merge(player_values, nation_rankings, by = "country_of_citizenship", all.x = TRUE)
+
+player_values <- player_values |>
+  mutate(country_level = case_when(
+           Rank %in% c(1, 2, 4, 5) ~ "Level 1",
+           Rank == 3 ~ "England",
+           Rank <= 15 ~ "Level 2",
+           Rank <= 35 ~ "Level 3",
+           Rank >= 36 ~ "Level 4")) 
+
+goals <- appearences |>
+            mutate(date = as.Date(date, format = "%Y-%m-%d")) |>
+            filter(player_id %in% player_values$player_id, date >= as.Date("2022-08-01")) |>
+            select(player_id, goals) |>
+            group_by(player_id) |>
+            summarize(total_goals = sum(goals))
+
+player_values <- merge(player_values, goals, by = "player_id", all.x = TRUE)
+
+assists <- appearences |>
+              mutate(date = as.Date(date, format = "%Y-%m-%d")) %>%
+              filter(player_id %in% player_values$player_id, date >= as.Date("2022-08-01")) |>
+              select(player_id, assists) |>
+              group_by(player_id) |>
+              summarize(total_assists = sum(assists))
+
+player_values <- merge(player_values, assists, by = "player_id", all.x = TRUE)
+
+player_values <- player_values |>
+                    mutate(date_of_birth = as.Date(date_of_birth, format = "%Y-%m-%d"),
+                      age = as.numeric(difftime(Sys.Date(), date_of_birth, units = "days")) %/% 365.25)
+
+lm_rank2 <- lm(log(market_value_in_eur) ~ Rank, data= player_values)
+
+player_values <- player_values |>
+  filter(foot %in% c("left", "right"))
+
+player_values <- player_values |>
+                  mutate(total_goals = ifelse(is.na(total_goals), 0, total_goals)) |>
+                  mutate(total_assists = ifelse(is.na(total_assists), 0, total_assists))
+
+player_values <- player_values |>
+          mutate(sub_position = case_when(
+              sub_position %in% c("Central Midfield", "Defensive Midfield", "Attacking Midfield") ~ "Central Midfield",
+              sub_position %in% c("Left-Back", "Right-Back") ~ "Fullback",
+              sub_position %in% c("Left Midfield", "Right Midfield", "Left Winger", "Right Winger") ~ "Wingers",
+              sub_position %in% c("Centre-Forward", "Second Striker", "Forward") ~ "Forward",
+              sub_position == "Centre-Back" ~ "Centre-Back",
+              sub_position == "Goalkeeper" ~ "Goalkeeper",
+              TRUE ~ as.character(sub_position)
+          ))
+
+player_values <- player_values |>
+            mutate(total_ga = total_goals + total_assists)
+
+```
+
+
+### Introduction
+
+Soccer is the sport that generates the most money worldwide. With the amount of revenue generated comes huge transfer fees. In todays market it is not uncommon to see players being sold for 100 million dollars. A fee that a decade ago would have been record breaking. In the summer transfer window of 2023 FIFA reported that a total of 7.36 billion US dollars were spent worldwide on soccer players (https://theathletic.com/4844507/2023/09/08/summer-transfer-window-2023-record/). Out of these 7.36 billion, 2.9 billion US dollars came from England. This comes to no surprise to fans of the sport as the English Premier League is the largest league in the world and last year reported a total revenue of 6.96 billion US dollars across all 20 teams (https://www.reuters.com/sports/soccer/premier-league-clubs-post-record-revenues-europe-recovers-covid-19-impact-2023-06-14/). This rise of expenditure has led to many debates regarding the value of a player and whether a club has overspent on a player or not. *The purpose of this project is to analyze the different factors that determine player market value and to try to model these relationships between various factors and market value*.
+
+*The data set I'm using is from Kaggle and it consists of data from Transfermarkt. Most analyses on Kaggle using this data set pertain to a certain soccer team, to scouting players, or just an explanatory data analysis in which someone tries to find interesting trends*.  Transfermarkt is the most popular soccer website for viewing player valuations and other information (https://www.nytimes.com/2021/08/12/sports/soccer/soccer-football-transfermarkt.html). This data set consists of various csv files that each contain relevant information pertaining to player statistics and valuations The three I will be using in this are
+
+  players - contains data about all players in Transfermarkt's database. Relevant columns from this table are name, country of citizenship, date of birth, position, sub position, foot, height, market value, highest market value, and current club. All of these contain information that could help in the prediction of player market values.
+  
+  player_valuations - contains data about all player valuations ever entered in Transfermarkt's database. The relevant column in this table is "last season" as using it I can filter out only the players that have played in 2023, therefore filtering out older players as player values used to be lower in the past.
+  
+  appearances - contains data about every player appearance ever recorded in Transfermarkt's database. This will be useful as I will extract goals and assists statistics from it. 
+  
+Additionally, I imported a dataset from FIFA that contains the most recent nation rankings. This table only consists of two main columns, rank and country name.
+  
+For this project I will begin with a simple linear regression model in regards to a players nationality and market value. I will then attempt to make the most efficient multiple regression model using model selection techniques. Finally, I will conduct a nested model comparison with a model that contains additional factors besides nationality
+
+**Initial Data Wrangling**
+
+After importing the CSV files using read.csv() I then created the *player_values* data frame which is the data set that I will be using for all future visualizations and models. I filtered it so that *player_values* only has players that have played in an English team within the last year and that have a valid integer for their market value. I then selected the following variables:
+
+player_id - primary id for players.csv and reference key in appearances.csv and player_valuations.csv
+name
+country_of_citizenship - as players may have multiple citizenships this column shows the country they represent internationally
+date_of_birth
+sub_position - the specific name of the position they play
+position - the category of their position, for example, defence or attack
+foot - their stronger foot
+height_in_cm
+market_value_in_eur - their most recent market valuation in euros
+highest_market_value_in_eur
+current_club_name - the team they play for
+
+Additionally, I created a goals, an assists, and a total goals + assists column using the data from the *appearances* data. I made sure to filter out so only goals scored in the last season are included. I also filtered out all missing values and replaced NA for 0. Then I merged them by matching the player_id from both tables. Finally, I removed all rows that did not have left or right as their stronger foot.
+
+### Part 1: Simple Linear Regression Using player nationalities
+
+**Intro**
+
+As player market values become discussed more and more among the footballing world, there have been many debates regarding whether a players country influences their value. With many claiming that English players for example are overhyped and overpriced as players from countries with worse soccer team such as Morocco or Mexico might be undervalued. Therefore this initial analysis will be a linear regression model to assess the impact of a players nationality on their market value. For this analysis I will use a country's rank. FIFA determines a nations rank based on their match results and these rankings can be used to guage how good a player's nation is at soccer. It is important to note that as nation rank increases then the nation gets worse as the best team is ranked at 1.
+Here are the null and alternative hypotheses
+
+$H0: \beta_1 = 0 ; HA: \beta_1 < 0$
+
+In words: the null hypothesis is that there is no relationship between a players nation rank and their market value, while the alternative hypothesis is that as a player's nation rank increases then their market value decreases.
+
+**Data Wrangling**
+
+I began the data wrangling for this analysis by importing the FIFA nation rankings table. I fixed some of the nation names to match the names in the *player_values* data. I then merged with *player_values* and created a new column called Rank. I also created another column called country_level in which each nation rank corresponds to a different level. This is to help with visualizations. 
+
+**Data Visualizations**
+
+I began by plotting out the nation rank as the independent variable and market value as the dependent variable. From the graph there is a visible relationship between nation rank and market value as the line of best fit seems to have a negative slope. Something else interesting to not is the outlier point around rank 45 and over 150,000,000 market value. Despite this maybe having an effect on the data, it should not be removed as it corresponds to Haaland, the best soccer player in the world currently and therefore despite being Norwegian it is no mistake that he is valued so highly.
+
+
+```{r warning= FALSE}
+
+ggplot(player_values, aes(x = Rank, y = market_value_in_eur, color= country_level)) +
+  geom_jitter(alpha = 0.9) +
+  geom_smooth(method='lm', formula= y ~ x, color= 'brown') +
+  theme_classic() +
+  xlab("Nation Rank") +
+  ylab("Market Value (In Euros)") +
+  ggtitle("Nation Rank vs Market Value")  +
+  xlim(c(0,75)) +
+  labs(color = "Country Level") 
+  
+```
+
+*Checking Normality*
+
+I began by creating the linear regression model with nation rank as the independent variable and market value as the dependent variable. I then plotted the QQ-plot which showed that the data was not normally distributed.
+
+```{r}
+
+lm_rank <- lm(market_value_in_eur ~ Rank, data= player_values)
+
+plot(lm_rank, which= 2)
+
+```
+
+**Transforming Data**
+
+As the data was not normal I took the log transformation of the response variable $\hat{y}$, in this case the market value. After this I called the summary() command and found the p-value of the model to be 0.0005727 which is indeed below the significance level of 0.05 meaning that it is statistically significant. Also I found that the $\beta_1$ value is -0.009711. Therefore we can accept the alternative hypothesis and market value does decrease as nation rank increases.
+
+```{r}
+
+lm_rank2 <- lm(log(market_value_in_eur) ~ Rank, data= player_values)
+
+```
+ 
+Linear regression equation =
+
+$\hat{Y} = \beta_0 + \beta_1 * Nation Rank$
+
+With Y hat being the estimated player market value.
+
+
+### Part 2: Model Selection for Multiple Regression Model
+
+**Checking for Interaction Effects**
+
+First I plotted an interaction plot between position and foot with market value as the y value. This initial graph demonstrates that there is likely not an interaction between position and foot as both lines seem to follow a similar trend. The only notable difference being the sharp spike for the left foot, forward which can be explained by Haaland, the same outlier in the previous linear regression model. It does show that there is likely a main effect from position however as both lines change in market value depending on the position.
+
+
+```{r message=FALSE}
+
+player_values |>
+  group_by(foot, sub_position) |>
+  summarize(mean_market_value = mean(market_value_in_eur)) |>
+  ggplot(aes(sub_position, mean_market_value, color = foot)) +
+  geom_point() +
+  geom_line(aes(group = foot), linetype = "solid") +  
+  ylab("Market Value") +
+  xlab("Position") +
+  ggtitle("Interaction Plot Between Position and Foot") +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1)) +
+  scale_color_manual(values = c("left" = "blue", "right" = "red"))
+
+```
+
+I then conducted a second isualizations to try to gather insight into the relationship between a players age and their strong foot. This seemed to repeat a similar result to the last graph with no clear interaction effect present although there does seem to be a main effect for age. At first this graph was hard to decipher however using the geom_smooth() line helped make the relationships easy to see. Around the age of 23 there is a spike for left foot but this again can be explained by Haaland and is not a sign of an interaction effect.
+
+```{r message=FALSE}
+
+player_values |>
+  group_by(foot, age) |>
+  summarize(mean_market_value = mean(market_value_in_eur)) |>
+  ggplot(aes(age, mean_market_value, color = foot)) +
+  geom_line(aes(group = foot), linetype = "dashed", color= 'gray') +  
+  ylab("Market Value") +
+  xlab("Age") +
+  ggtitle("Interaction Plot Between Age and Foot") +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1)) +
+  geom_smooth()
+
+```
+
+
+To finish analyzing possible interaction effects I decided to run a factorial ANOVA with all possible variables. Here are the main takeaways. Firstly, 5 of the variables had a p-value less than 0.05 and therefore are statistically significant with foot being the only factor that is not statistically significant. The only interaction effects seen in this plot involved total goals and assists, however as explained earlier on these results are likely because of Haaland who is an outlier due to his large amount of goals, therefore the p-values are most likely not statistically significant
+(full summary in appendix)
+
+
+```{r}
+
+lm_all <- lm(log(market_value_in_eur) ~ sub_position * age * foot * Rank * height_in_cm * total_ga, data= player_values)
+
+```
+
+
+*Cross-Validation of different models*
+
+As I conducted the previous tests I have concluded the best model in terms of which variables should have significant interaction and main effects. However, I want to make sure that I am not over fitting with my model. Therefore I will be using cross-validation to test different models with varying number of predictors to then calculate which one has the lowers MSPE.
+
+I began by splitting up the player_values data into training and testing data with a 70-30 split.
+
+```{r}
+
+total_num_points <- dim(player_values)[1]
+num_training_points <- floor(0.7 * nrow(player_values))
+
+training_data <- player_values[1:num_training_points, ]
+test_data <- player_values[(num_training_points + 1):total_num_points, ]
+
+```
+
+I then fit the three different models each with different predictors, I started with all 5 predictors and then removed them one by one according to the highest p-values.
+
+```{r}
+
+lm_fit1 <- lm(log(market_value_in_eur) ~ sub_position + total_ga + height_in_cm + Rank + age, data= training_data)
+
+lm_fit2 <- lm(log(market_value_in_eur) ~ sub_position + total_ga + Rank + age, data= training_data)
+
+lm_fit3 <- lm(log(market_value_in_eur) ~ sub_position + Rank + age, data= training_data)
+
+```
+
+```{r}
+
+test_1 <- predict(lm_fit1, newdata = test_data)
+
+test_2 <- predict(lm_fit2, newdata = test_data)
+
+test_3 <- predict(lm_fit3, newdata = test_data)
+
+MSPE_1 <- mean((test_data$market_value_in_eur - test_1)^2)
+
+MSPE_2 <- mean((test_data$market_value_in_eur - test_2)^2)
+
+MSPE_3 <- mean((test_data$market_value_in_eur - test_3)^2)
+
+which.min(c(MSPE_1, MSPE_2, MSPE_3))
+
+```
+According to the MSPEs the most effective model is the third one with the predictors of position, nation rank, and age. 
+
+```{r}
+
+lm_fit <- lm(log(market_value_in_eur) ~ sub_position + Rank + age, data= player_values)
+
+anova(lm_fit)
+
+```
+
+*Nested Model Comparison*
+
+Now I will be conducting a nested model comparison to see if the model with the 5 predictors is a better fit than the nation rank linear regression model from part 1. I will use the formula $F = \frac{(SSRes_{Reduced} - SSRes_{Full}) / q}{SSRes_{Full}/(n-k-1)}$
+
+The null and alternative hypothesis are 
+
+$H0: \beta_{position} = \beta_{age} = \beta_{nation rank} = 0$
+
+$HA:$ at least one of $\beta_{position}, \beta_{age}, \beta_{nation rank} \ne 0$
+
+```{r}
+
+SSRes_reduced <- anova(lm_rank2)[2, "Sum Sq"]
+
+SSRes_full <- anova(lm_fit)[4, "Sum Sq"]
+  
+n <- nrow(player_values)
+
+numerator <- (SSRes_reduced - SSRes_full) / 2
+  
+denominator <- (SSRes_full) / (n - 3 - 1)
+
+numerator/denominator
+
+anova(lm_rank2, lm_fit)
+
+```
+I also ran an ANOVA table with the two models. Using the F-statistic and the p-value which is less than 0.05 then we can reject the null hypothesis. Meaning that we accept the alternative hypothesis and the full model is more accurate than the reduced one.
+
+
+
+### Conclusion
+
+In conclusion, the linear regression model did prove that a player's nationality has an effect on their market value. It would be interesting to pose this model in other countries that have less foreign players and seeing if the relationship changes. However, it certainly is interesting that a player's country can contribute to their market value and perhaps this has to do with biases. Player values would be more accurate if there biases were removed altogether. 
+As for the multiple regression model I found that sometimes too many predictors can cause overfitting, as was shown by the cross validation. Another notable takeaway was the lack of interaction effects, perhaps with access to more in-depth soccer statistics then we would see more interaction between variables. Finally, the nested model helped confirm that the final lm_fit model is the most accurate and that adding more predictors to the initial linear regression is beneficial
+All in all, through these analyses I learned more about the soccer player transfer market and the various factors that are taken into consideration when Tranfermarkt values players.
+
+
+## Reflection on Canvas
+
+
+## Appendix
+
+**Data Wrangling**
+
+Importing CSV Files
+
+```{r}
+
+appearences <- read.csv("appearances.csv")
+
+player_valuations <- read.csv("player_valuations.csv")
+
+players <- read.csv("players.csv")
+
+```
+
+Creating player_values data frame
+
+```{r}
+
+active_players <- player_valuations |>
+                  filter(last_season == '2023')
+
+player_values <- players |>
+                    filter(current_club_domestic_competition_id == 'GB1') |>
+                    filter(!is.na(market_value_in_eur)) |>
+                    filter(player_id %in% active_players$player_id) |>
+                    select(player_id, name, country_of_citizenship, date_of_birth, sub_position, position, foot, height_in_cm, market_value_in_eur, highest_market_value_in_eur, current_club_name)
+          
+```
+
+Creating a Rank column in player_values using a table from FIFA that contains the nation rankings. Also had to fix some country naming differences between the two data sets
+
+```{r}
+
+nation_rankings <- read.csv("FIFA_rankings.csv")
+
+nation_rankings <- nation_rankings |>
+                    rename("country_of_citizenship" = "Nation")
+
+nation_rankings <- nation_rankings|> 
+    mutate(country_of_citizenship = ifelse(row_number() == 60, "Ireland", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 12, "United States", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 21, "Iran", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 23, "South, Korea", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 39, "Czech Republic", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 50, "Cote d'Ivoire", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 67, "DR Congo", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 66, "Bosnia-Herzegovina", country_of_citizenship)) |>
+    mutate(country_of_citizenship = ifelse(row_number() == 104, "New Zealand", country_of_citizenship))
+  
+player_values <- merge(player_values, nation_rankings, by = "country_of_citizenship", all.x = TRUE)
+
+```
+
+Creating a levels column based on the rank of a players nation
+
+```{r}
+
+player_values <- player_values |>
+  mutate(country_level = case_when(
+           Rank %in% c(1, 2, 4, 5) ~ "Level 1",
+           Rank == 3 ~ "England",
+           Rank <= 15 ~ "Level 2",
+           Rank <= 35 ~ "Level 3",
+           Rank >= 36 ~ "Level 4")) 
+  
+```
+
+Creating goals column in player_values using appearances table
+
+```{r}
+
+goals <- appearences |>
+            filter(player_id %in% player_values$player_id) |>
+            select(player_id, goals) |>
+            group_by(player_id) |>
+            summarize(total_goals = sum(goals))
+
+```
+
+```{r}
+
+player_values <- merge(player_values, goals, by = "player_id", all.x = TRUE)
+
+```
+
+Creating assists column in player_values using appearances table
+
+```{r}
+
+assists <- appearences |>
+              filter(player_id %in% player_values$player_id) |>
+              select(player_id, assists) |>
+              group_by(player_id) |>
+              summarize(total_assists = sum(assists))
+
+```
+
+```{r}
+
+player_values <- merge(player_values, assists, by = "player_id", all.x = TRUE)
+
+```
+
+Creating total goals + assists colum
+
+```{r}
+
+player_values <- player_values |>
+            mutate(total_ga = total_goals + total_assists)
+
+```
+
+Filtering out NA values and players without a strong foot
+
+```{r}
+
+layer_values <- player_values |>
+  filter(foot %in% c("left", "right"))
+
+player_values <- player_values |>
+                  mutate(total_goals = ifelse(is.na(total_goals), 0, total_goals)) |>
+                  mutate(total_assists = ifelse(is.na(total_assists), 0, total_assists))
+
+```
+
+I used an R package called lubridate and with the help of several online forums (such as this one https://stackoverflow.com/questions/70531616/how-can-i-convert-birth-date-to-age). I was able to mutate the date_of_birth column to create a new column called age.
+
+```{r}
+
+player_values <- player_values |>
+                    mutate(date_of_birth = as.Date(date_of_birth, format = "%Y-%m-%d"),
+                      age = as.numeric(difftime(Sys.Date(), date_of_birth, units = "days")) %/% 365.25)
+
+```
+
+Changing sub_position to more encompassing categories
+
+```{r}
+
+player_values <- player_values |>
+          mutate(sub_position = case_when(
+              sub_position %in% c("Central Midfield", "Defensive Midfield", "Attacking Midfield") ~ "Central Midfield",
+              sub_position %in% c("Left-Back", "Right-Back") ~ "Fullback",
+              sub_position %in% c("Left Midfield", "Right Midfield", "Left Winger", "Right Winger") ~ "Wingers",
+              sub_position %in% c("Centre-Forward", "Second Striker", "Forward") ~ "Forward",
+              sub_position == "Centre-Back" ~ "Centre-Back",
+              sub_position == "Goalkeeper" ~ "Goalkeeper",
+              TRUE ~ as.character(sub_position)
+          ))
+
+```
+
+
+**Appendix: Data Visualizations**
+
+Boxplot of country levels with nation rank as x and market value as y
+
+```{r warning=FALSE}
+
+ggplot(aes(x = Rank, y = market_value_in_eur, fill = country_level), data = player_values) +
+    geom_boxplot() +
+    scale_fill_manual(values = c("cornflowerblue", "lightcoral","lightskyblue","darkseagreen","thistle")) +
+    scale_color_manual(values = c("cornflowerblue", "lightcoral","lightskyblue","darkseagreen","thistle")) +
+    theme_classic() +
+    xlab("Nation Rank") +
+    ylab("Market Value (In Euros)") +
+    ggtitle("Nation Rank vs Market Value") +
+    xlim(c(0,75)) +
+    labs(fill= 'Country Level')
+
+
+```
+
+Comparison of the market values of different positions
+
+```{r}
+
+ggplot(player_values, aes(x= sub_position, y= market_value_in_eur)) +
+    geom_violin() +
+    xlab("Position") +
+    ylab("Market Value (in euros)") +
+    ggtitle("Boxplot of Market Value vs Position") +
+    theme(axis.text.x = element_text(size = 7.5, angle = 45, hjust = 1)) 
+    
+
+```
+The relationship between age and market value depending on a player's position
+
+```{r message=FALSE}
+
+ggplot(player_values, aes(x= age, y= market_value_in_eur)) +
+    geom_point() +
+    facet_wrap(~sub_position) +
+    xlab("Age") +
+    ylab("Market Value") +
+    ggtitle("Boxplot of Age vs Market Value by Position") +
+    theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1)) +
+    geom_smooth()
+
+```
+
+
+**Appendix: Model Selection Statistics**
+
+Summary of all variables to analyze possible interaction effects
+
+```{r}
+
+summary(aov(log(market_value_in_eur) ~ sub_position * age * foot * Rank * height_in_cm * total_ga, data= player_values))
+
+```
+
+
+
+
+**References**
+
+https://www.kaggle.com/datasets/davidcariboo/player-scores/data
+
+https://www.fifa.com/fifa-world-ranking/men
+
+https://www.nytimes.com/2021/08/12/sports/soccer/soccer-football-transfermarkt.html
+
+
+
+
+
+
+
+
